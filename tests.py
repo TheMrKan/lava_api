@@ -23,11 +23,18 @@ def test_get_signature():
 async def create_test_invoice():
     api = LavaBusinessAPI(SECRET_KEY)
     info = await api.create_invoice(30, f"{random.randint(0, 999999):06d}", SHOP_ID, 120, "some_json_data", "Comment")
-    print(info)
+    print("Created invoice info:", info)
+
+
+def test_generate_random_orderid():
+    api = LavaBusinessAPI(SECRET_KEY)
+    key = api.generate_random_order_id()
+    print("Random orderid:", key)
 
 
 async def main():
     test_get_signature()
+    test_generate_random_orderid()
     await create_test_invoice()
 
 

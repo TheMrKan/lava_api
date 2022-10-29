@@ -1,6 +1,8 @@
 """
 Python модуль для взаимодействия с Lava Business API
 """
+import datetime
+import random
 
 import aiohttp
 import json
@@ -11,28 +13,37 @@ from dataclasses import dataclass
 from typing import List
 
 
-class InvalidResponseException(Exception):
+class CreateInvoiceException(Exception):
+    """
+    При выставлении счета произошла неизвестная ошибка. Базовый класс для всех ошибок выставления счета
+    """
+    code: int
+    message: str
+
+    def __init__(self, description: str = "Error", message: str = "Error", code: int = -1):
+        self.code = code
+        self.message = message
+
+        super().__init__(description)
+
+
+class InvalidResponseException(CreateInvoiceException):
     """
     Не удалось обработать ответ, полученный от сервера.
     """
 
 
-class InvalidParameterException(Exception):
+class InvalidParameterException(CreateInvoiceException):
     """
     Счет с таким айди уже существует.
     """
 
 
-class InvalidSignatureException(Exception):
+class InvalidSignatureException(CreateInvoiceException):
     """
     Ошибка при генерации сигнатуры.
     """
 
-
-class InvoiceCreationException(Exception):
-    """
-    При выставлении счета произошла неизвестная ошибка
-    """
 
 
 @dataclass
@@ -82,10 +93,21 @@ class LavaBusinessAPI:
         signature = digest.hexdigest()
         return signature
 
+    @staticmethod
+    def generate_random_order_id() -> str:
+        """
+        Генерирует уникальный айди счета используя текущее время и два случайных числа
+
+        :return:
+        """
+        now = datetime.datetime.now()
+        order_id = f"{now.strftime('%Y%m%d')}-{random.randint(0, 9999):04d}-{now.strftime('%H%M%S')}-{random.randint(0, 9999):04d}"
+        return order_id
+
     async def create_invoice(self,
                              amount: float,
-                             order_id: str,
                              shop_id: str,
+                             order_id: str = None,
                              expire: int = None,
                              custom_field: str = None,
                              comment: str = None,
@@ -99,7 +121,7 @@ class LavaBusinessAPI:
         Выставляет счет с задаными параметрами (см. https://dev.lava.ru/api-invoice-create).
 
         :param amount: Сумма
-        :param order_id: Айди счета (должен быть уникальным)
+        :param order_id: Айди счета (должен быть уникальным). Если не указан, то будет сгенерирован автоматически.
         :param shop_id: Айди магазина
         :param expire: Время жизни счета в минутах
         :param custom_field: Дополнительная информация, которая будет передана в Webhook после оплаты
@@ -112,6 +134,9 @@ class LavaBusinessAPI:
 
         :return: Информация о выставленном счете
         """
+        # если айди счета не указан, то генерируем случайный
+        if order_id is None:
+            order_id = self.generate_random_order_id()
 
         fields = {"orderId": order_id, "shopId": shop_id, "sum": amount}
 
@@ -163,22 +188,23 @@ class LavaBusinessAPI:
                         except KeyError as ex:
                             print("Error while reading data from dictionary: ")
                             print(ex)
-                            raise InvalidResponseException
+                            raise InvalidResponseException("Error while reading data from dictionary")
 
                     elif request_status == 422:
                         if isinstance((error := response_json.get('error', '')), dict):
-                            raise InvalidParameterException(f"Invalid parameters: {', '.join(error.keys())}; Code: {request_status}; Message: {response_json.get('error', '')}")
+                            raise InvalidParameterException(f"Invalid parameters: {', '.join(error.keys())}; Code: {request_status}; Message: {response_json.get('error', '')}", response_json.get('error', ''), request_status)
                         else:
                             print("Error while reading data from dictionary: ")
-                            raise InvalidResponseException(print(f"Invalid 'error' field: {response_json.get('error', '')}"))
+                            raise InvalidResponseException(f"Invalid 'error' field: {response_json.get('error', '')}", response_json.get('error', ''), request_status)
                     elif request_status == 401:
-                        raise InvalidSignatureException(f"Invalid signature. Code: {request_status}; Message: {response_json.get('error', '')}")
+                        raise InvalidSignatureException(f"Invalid signature. Code: {request_status}; Message: {response_json.get('error', '')}", response_json.get('error', ''), request_status)
                     else:
-                        raise InvoiceCreationException(f"Unexpected error. Code: {request_status}; Message: {response_json.get('error', '')}")
+                        raise CreateInvoiceException(f"Unexpected error. Code: {request_status}; Message: {response_json.get('error', '')}", response_json.get('error', ''), request_status)
 
-                except (InvalidParameterException, InvalidSignatureException, InvoiceCreationException) as ex:
+                except (InvalidParameterException, InvalidSignatureException, CreateInvoiceException) as ex:
                     raise ex
                 except Exception as ex:
                     print("Error while handling server response: ")
                     print(ex)
                     raise InvalidResponseException
+
