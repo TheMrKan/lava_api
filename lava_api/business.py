@@ -1,6 +1,7 @@
 """
 Python модуль для взаимодействия с Lava Business API
 """
+import copy
 import datetime
 import random
 
@@ -10,7 +11,7 @@ import hmac
 import hashlib
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import List
+from typing import List, Dict, Any
 
 
 class CreateInvoiceException(Exception):
@@ -27,7 +28,7 @@ class CreateInvoiceException(Exception):
         super().__init__(description)
 
 
-class InvalidResponseException(CreateInvoiceException):
+class InvalidResponseException(Exception):
     """
     Не удалось обработать ответ, полученный от сервера.
     """
@@ -41,16 +42,33 @@ class InvalidParameterException(CreateInvoiceException):
 
 class InvalidSignatureException(CreateInvoiceException):
     """
-    Ошибка при генерации сигнатуры.
+    Ошибка авторизации.
     """
 
+
+class InvalidWebhookSignatureException(Exception):
+    """
+    Неверные заголовки вебхука или сигнатура
+    """
+
+
+@dataclass
+class SuccessfulInvoiceInfo:
+    invoice_id: str    # айди счета в системе лавы (получается при выставлении счета)
+    order_id: str    # айди счета в системе мерчанта (order_id, передаваемый в create_invoice)
+    status: str    # статус счета (см. https://dev.lava.ru/status)
+    payed: bool    # упрощенный status. Устанавливается библиотекой в зависимости от полученного статуса счета. Указывает, оплачен ли счет
+    pay_time: datetime.datetime    # дата и время оплаты счета
+    amount: float    # сумма для оплаты, указанная при выставлении счета
+    credited: float    # сумма, зачисленная на баланс магазина, т. е. amount с учетом комиссии
+    custom_field: str    # дополнительное поле, переданное при выставлении счета
 
 
 @dataclass
 class InvoiceInfo:
     invoice_id: str    # айди счета
     amount: float    # сумма
-    expired: str    # время, до которого активен счет, в формате YYYY-MM-dd HH:mm:ss
+    expired: datetime.datetime    # дата и время до которого активен счет
     status: int    # статус
     shop_id: str    # айди магазина, от лица которого был выставлен счет
     merchant_name: str    # название магазина, выставившего счет
@@ -132,6 +150,11 @@ class LavaBusinessAPI:
         :param include_service: Если указаны, то будут отображены только эти методы оплаты
         :param exclude_service: Если указаны, то эти методы будут исключены из списка доступных
 
+        :exception CreateInvoiceException: Неизвестная ошибка при выставлении счета. Содержит код ошибки и сообщение от лавы
+        :exception InvalidResponseException: Не удалось обработать ответ, полученный от сервера (получен ответ, структура которого не соответствует ожидаемой)
+        :exception InvalidParameterException: Сервер сообщает о неправильном параметре. Подробности в тексте ошибки, а так же полях code и message
+        :exception InvalidSignatureException: Ошибка авторизации
+
         :return: Информация о выставленном счете
         """
         # если айди счета не указан, то генерируем случайный
@@ -195,7 +218,7 @@ class LavaBusinessAPI:
                             raise InvalidParameterException(f"Invalid parameters: {', '.join(error.keys())}; Code: {request_status}; Message: {response_json.get('error', '')}", response_json.get('error', ''), request_status)
                         else:
                             print("Error while reading data from dictionary: ")
-                            raise InvalidResponseException(f"Invalid 'error' field: {response_json.get('error', '')}", response_json.get('error', ''), request_status)
+                            raise InvalidResponseException(f"Invalid 'error' field: {response_json.get('error', '')}")
                     elif request_status == 401:
                         raise InvalidSignatureException(f"Invalid signature. Code: {request_status}; Message: {response_json.get('error', '')}", response_json.get('error', ''), request_status)
                     else:
@@ -208,3 +231,48 @@ class LavaBusinessAPI:
                     print(ex)
                     raise InvalidResponseException
 
+    def handle_webhook(self, received_data: Dict[Any, Any], headers: Dict[Any, Any]) -> SuccessfulInvoiceInfo:
+        """
+        Обрабатывает полученный от лавы вебхук
+
+        :param received_data: Данные, переданные сервером в JSON формате
+        :param headers: Заголовки, переданные сервером
+        :raise InvalidWebhookSignatureException: Сигнатура, отправленная сервером, не совпадает со сгенерированной локально
+        :raise InvalidResponseException: Не удалось обработать ответ, полученный от сервера (получен ответ, структура которого не соответствует ожидаемой)
+        :return: Информация о состоянии счета
+        """
+        headers = {k.lower(): v for k, v in headers.items()}    # делаем проверку заголовков нечувствительной к регистру
+
+        if "authorization" not in headers.keys():
+            raise InvalidWebhookSignatureException("No 'Authorization' header")
+
+        server_signature = headers["authorization"]
+        local_signature = self.generate_signature(received_data)    # генерируем сигнатуру с использованием локального ключа и полей, полученных от сервера
+
+        if server_signature != local_signature:    # сравниваем полученную сигнатуру со сгенерированной
+            raise InvalidWebhookSignatureException("Server and client signatures don't match")
+
+        try:
+            # если время оплаты не передано или передано в неподходящем формате, то устанавливаем текущую дату
+            try:
+                pay_time = datetime.datetime.strptime(received_data["payed"], "%Y-%m-%d %H:%M:%S")
+            except (ValueError, KeyError):
+                pay_time = datetime.datetime.now()
+
+            # см. https://dev.lava.ru/business-webhook
+            successful_invoice_info = SuccessfulInvoiceInfo(
+                received_data["invoice_id"],
+                received_data.get("order_id", ""),
+                received_data["status"],
+                received_data["status"] == "success",
+                pay_time,
+                float(received_data["amount"]),
+                float(received_data["credited"]),
+                custom_fields if (custom_fields := received_data.get("custom_field"), None) is not None else "",
+            )
+        except KeyError as ex:
+            print("Error while reading data from dictionary: ")
+            print(ex)
+            raise InvalidResponseException("Error while reading data from dictionary")
+
+        return successful_invoice_info
