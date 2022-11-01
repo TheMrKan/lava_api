@@ -1,7 +1,6 @@
 """
 Python модуль для взаимодействия с Lava Business API
 """
-import copy
 import datetime
 import random
 
@@ -14,9 +13,9 @@ from dataclasses import dataclass
 from typing import List, Dict, Any
 
 
-class CreateInvoiceException(Exception):
+class APIError(Exception):
     """
-    При выставлении счета произошла неизвестная ошибка. Базовый класс для всех ошибок выставления счета
+    Ошибка, полученная от Lava.
     """
     code: int
     message: str
@@ -26,6 +25,12 @@ class CreateInvoiceException(Exception):
         self.message = message
 
         super().__init__(description)
+
+
+class CreateInvoiceException(APIError):
+    """
+    При выставлении счета произошла неизвестная ошибка. Базовый класс для всех ошибок выставления счета
+    """
 
 
 class InvalidResponseException(Exception):
@@ -215,7 +220,7 @@ class LavaBusinessAPI:
 
                     elif request_status == 422:
                         if isinstance((error := response_json.get('error', '')), dict):
-                            raise InvalidParameterException(f"Invalid parameters: {', '.join(error.keys())}; Code: {request_status}; Message: {response_json.get('error', '')}", response_json.get('error', ''), request_status)
+                            raise InvalidParameterException(f"Invalid parameters: {', '.join(error.keys())}; Code: {request_status}; Message: {response_json.get('error', '')}", str(response_json.get('error', '')), request_status)
                         else:
                             print("Error while reading data from dictionary: ")
                             raise InvalidResponseException(f"Invalid 'error' field: {response_json.get('error', '')}")
@@ -276,3 +281,79 @@ class LavaBusinessAPI:
             raise InvalidResponseException("Error while reading data from dictionary")
 
         return successful_invoice_info
+
+    async def get_balance(self, shop_id: str) -> float:
+        """
+        Возвращает баланс указанного магазина
+        :param shop_id: ID магазина
+        :return: Баланс магазина
+        """
+        fields = {"shopId": shop_id}
+        fields["signature"] = self.generate_signature(fields)
+
+        async with aiohttp.ClientSession() as session:
+            # заголовок Accept необходимо передавать со всеми запросами. Content-Type добавляется автоматически (см. https://dev.lava.ru/info)
+            async with session.post('https://api.lava.ru/business/shop/get-balance', json=fields, headers={"Accept": "application/json"}) as response:
+                response_json = await response.json()
+                if response_json.get("status", "error") == 422:
+                    raise InvalidParameterException(f"Invalid parameters: {', '.join(response_json.get('error', {}).keys())}", code=int(response_json.get('status')), message=str(response_json.get("error")))
+                elif response_json.get("status", "error") != 200:
+                    raise APIError(f"API error: {response_json.get('error')}", code=int(response_json.get('status')), message=str(response_json.get("error")))
+                else:
+                    try:
+                        data = response_json["data"]
+                    except KeyError:
+                        raise InvalidResponseException("No 'data' field")
+
+                    try:
+                        balance = data["balance"]
+                    except KeyError:
+                        raise InvalidResponseException("No 'balance' field")
+
+                    return balance
+
+    async def payoff(self, shop_id: str, amount: float, service: str, wallet: str, order_id=None, hook_url: str = None) -> str:
+        """
+        Создает вывод средств
+
+        :param shop_id: ID магазина
+        :param amount: Сумма
+        :param service: Сервис (см. https://dev.lava.ru/methods)
+        :param wallet: Номер кошелька
+        :param order_id: ID транзакции в системе мерчанта (если не указан, то будет сгенерирован автоматически)
+        :param hook_url: URL для отправки Webhook при изменении статуса транзакции
+        :return: ID транзакции в системе Lava
+        """
+
+        # если айди счета не указан, то генерируем случайный
+        if order_id is None:
+            order_id = self.generate_random_order_id()
+
+        fields = {"orderId": order_id, "shopId": shop_id, "amount": amount, "service": service + "_payoff", 'walletTo': wallet}
+
+        # если необязательные параметры указаны, то добавляем их к запросу
+        if hook_url is not None:
+            fields["hookUrl"] = hook_url
+
+        fields["signature"] = self.generate_signature(fields)
+
+        async with aiohttp.ClientSession() as session:
+            # заголовок Accept необходимо передавать со всеми запросами. Content-Type добавляется автоматически (см. https://dev.lava.ru/info)
+            async with session.post('https://api.lava.ru/business/payoff/create', json=fields, headers={"Accept": "application/json"}) as response:
+                response_json = await response.json()
+                if response_json.get("status", "error") == 422:
+                    raise InvalidParameterException(f"Invalid parameters: {', '.join(response_json.get('error', {}).keys())}; Message: {response_json.get('error', '')}", code=int(response_json.get('status')), message=str(response_json.get("error")))
+                elif response_json.get("status", "error") != 200:
+                    raise APIError(f"API error: {response_json.get('error')}", code=int(response_json.get('status')), message=str(response_json.get("error")))
+                else:
+                    try:
+                        data = response_json["data"]
+                    except KeyError:
+                        raise InvalidResponseException("No 'data' field")
+
+                    try:
+                        payoff_id = str(data["payoff_id"])
+                    except KeyError:
+                        raise InvalidResponseException("No 'payoff' field")
+
+                    return payoff_id
