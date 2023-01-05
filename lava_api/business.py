@@ -93,27 +93,18 @@ class LavaBusinessAPI:
     def __init__(self, secret_key: str):
         self.secret_key = secret_key
 
-    def generate_signature(self, fields: dict) -> str:
+    def generate_signature(self, string: str) -> str:
         """
         Генерирует сигнатуру, которая используется для подтверждения аутентификации и валидности пакетов.
         Используются заданные поля, отсортированные в алфавитном порядке по ключу.
         Шифрование происходит по алгоритму SHA256 с использованием секретного ключа.
         Подробнее: https://dev.lava.ru/api-invoice-sign
 
-        :param fields: Словарь, содержащий поля, для которых будет сгенерирована сигнатура. Чаще всего - все поля запроса, за исключением самой сигнатуры.
+        :param string: Строка, которая будет передана в тело HTTP запроса.
         :return: Строка-хеш, состоящая из HEX чисел, длиной 64 символа
         """
-        odict = OrderedDict(sorted(fields.items()))    # сортировка словаря по ключу
 
-        # separators нужен для приведения выходного JSON к виду, получаемому в PHP. В PHP по умолчанию отсутствуют пробелы после разделителей.
-        # Если не убрать пробелы, то строки, используемые при шифровании у клиента и на сервере будут разные, и сигнатуры совпадать не будут
-        # json, получаемый в python без указания separators: {"orderId": "6555214", "shopId": "4d499d82-2b99-4a7e-be26-5742c41e69e7"}
-        # json, получаемый в python с указанием separators:  {"orderId":"6555214","shopId":"4d499d82-2b99-4a7e-be26-5742c41e69e7"}
-        # json, получаемый в php:                            {"orderId":"6555214","shopId":"4d499d82-2b99-4a7e-be26-5742c41e69e7"}
-        msg = json.dumps(odict, separators=(',', ':'))
-        digest = hmac.new(self.secret_key.encode("utf-8"), msg=msg.encode("utf-8"),
-                          digestmod=hashlib.sha256)
-        signature = digest.hexdigest()
+        signature = hmac.new(bytes(self.secret_key, 'UTF-8'), string.encode(), hashlib.sha256).hexdigest()
         return signature
 
     @staticmethod
@@ -186,14 +177,16 @@ class LavaBusinessAPI:
         if exclude_service is not None:
             fields["excludeService"] = exclude_service
 
-        fields["signature"] = self.generate_signature(fields)
+        json_string = json.dumps(fields)
+        print(json_string)
+        signature = self.generate_signature(json_string)
 
         async with aiohttp.ClientSession() as session:
             # заголовок Accept необходимо передавать со всеми запросами. Content-Type добавляется автоматически (см. https://dev.lava.ru/info)
-            async with session.post('https://api.lava.ru/business/invoice/create', json=fields, headers={"Accept": "application/json"}) as response:
+            async with session.post('https://api.lava.ru/business/invoice/create', json=fields, headers={"Accept": "application/json", "Signature": signature}) as response:
                 try:
                     response_json = await response.json()
-
+                    print(response_json)
                     if (request_status := response_json.get("status", 0)) == 200:
                         invoice_data: dict = response_json.get("data", None)
 
