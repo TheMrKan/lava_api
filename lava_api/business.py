@@ -245,7 +245,7 @@ class LavaBusinessAPI:
             raise InvalidWebhookSignatureException("No 'Authorization' header")
 
         server_signature = headers["authorization"]
-        local_signature = self.generate_signature(received_data)    # генерируем сигнатуру с использованием локального ключа и полей, полученных от сервера
+        local_signature = self.generate_signature(json.dumps(received_data))    # генерируем сигнатуру с использованием локального ключа и полей, полученных от сервера
 
         if server_signature != local_signature:    # сравниваем полученную сигнатуру со сгенерированной
             raise InvalidWebhookSignatureException("Server and client signatures don't match")
@@ -282,11 +282,11 @@ class LavaBusinessAPI:
         :return: Баланс магазина
         """
         fields = {"shopId": shop_id}
-        fields["signature"] = self.generate_signature(fields)
+        signature = self.generate_signature(json.dumps(fields))
 
         async with aiohttp.ClientSession() as session:
             # заголовок Accept необходимо передавать со всеми запросами. Content-Type добавляется автоматически (см. https://dev.lava.ru/info)
-            async with session.post('https://api.lava.ru/business/shop/get-balance', json=fields, headers={"Accept": "application/json"}) as response:
+            async with session.post('https://api.lava.ru/business/shop/get-balance', json=fields, headers={"Accept": "application/json", "Signature": signature}) as response:
                 response_json = await response.json()
                 if response_json.get("status", "error") == 422:
                     raise InvalidParameterException(f"Invalid parameters: {', '.join(response_json.get('error', {}).keys())}", code=int(response_json.get('status')), message=str(response_json.get("error")))
@@ -328,11 +328,11 @@ class LavaBusinessAPI:
         if hook_url is not None:
             fields["hookUrl"] = hook_url
 
-        fields["signature"] = self.generate_signature(fields)
+        signature = self.generate_signature(json.dumps(fields))
 
         async with aiohttp.ClientSession() as session:
             # заголовок Accept необходимо передавать со всеми запросами. Content-Type добавляется автоматически (см. https://dev.lava.ru/info)
-            async with session.post('https://api.lava.ru/business/payoff/create', json=fields, headers={"Accept": "application/json"}) as response:
+            async with session.post('https://api.lava.ru/business/payoff/create', json=fields, headers={"Accept": "application/json", "Signature": signature}) as response:
                 response_json = await response.json()
                 if response_json.get("status", "error") == 422:
                     raise InvalidParameterException(f"Invalid parameters: {', '.join(response_json.get('error', {}).keys())}; Message: {response_json.get('error', '')}", code=int(response_json.get('status')), message=str(response_json.get("error")))
