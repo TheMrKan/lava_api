@@ -244,11 +244,11 @@ class LavaBusinessAPI:
         if "authorization" not in headers.keys():
             raise InvalidWebhookSignatureException("No 'Authorization' header")
 
-        server_signature = headers["authorization"]
+        '''server_signature = headers["authorization"]
         local_signature = self.generate_signature(json.dumps(received_data))    # генерируем сигнатуру с использованием локального ключа и полей, полученных от сервера
 
         if server_signature != local_signature:    # сравниваем полученную сигнатуру со сгенерированной
-            raise InvalidWebhookSignatureException("Server and client signatures don't match")
+            raise InvalidWebhookSignatureException("Server and client signatures don't match")'''
 
         try:
             # если время оплаты не передано или передано в неподходящем формате, то устанавливаем текущую дату
